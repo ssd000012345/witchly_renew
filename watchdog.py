@@ -33,6 +33,7 @@ WX_APP_TOKEN         = os.environ.get("WX_APP_TOKEN", "").strip()   # WxPusher A
 WX_UID               = os.environ.get("WX_UID", "").strip()          # WxPusher UID
 RENEW_THRESHOLD_DAYS = float(os.environ.get("RENEW_THRESHOLD_DAYS", "3"))
 ENABLE_RECORDING     = os.environ.get("ENABLE_RECORDING", "true").strip().lower() == "true"
+SKIP_RENEW           = os.environ.get("SKIP_RENEW", "false").strip().lower() == "true"
 
 BASE_URL       = "https://dash.witchly.host"
 SCREENSHOT_DIR = Path("screenshots")
@@ -778,8 +779,10 @@ def run():
             stability_text = info["stability_text"]
             snap(sb, "02-my-servers")
 
-            # ③ 续期检查
-            if stability_days is not None and stability_days < RENEW_THRESHOLD_DAYS:
+            # ③ 续期检查（Uptime Kuma 紧急触发时跳过）
+            if SKIP_RENEW:
+                log("⏩ SKIP_RENEW=true，跳过续期检查")
+            elif stability_days is not None and stability_days < RENEW_THRESHOLD_DAYS:
                 log(f"⚠ Stability {fmt_days(stability_days)} < {RENEW_THRESHOLD_DAYS}d，触发续期")
                 ok = renew_server(sb)
                 snap(sb, "03-after-renew")

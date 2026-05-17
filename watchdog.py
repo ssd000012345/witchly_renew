@@ -29,6 +29,8 @@ DISCORD_TOKEN        = os.environ.get("WITCHLY_DISCORD_TOKEN", "").strip()
 SERVER_ID            = os.environ.get("WITCHLY_SERVER_ID", "").strip()
 TG_BOT_TOKEN         = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID           = os.environ.get("TG_CHAT_ID", "").strip()
+WX_APP_TOKEN         = os.environ.get("WX_APP_TOKEN", "").strip()   # WxPusher AppToken
+WX_UID               = os.environ.get("WX_UID", "").strip()          # WxPusher UID
 RENEW_THRESHOLD_DAYS = float(os.environ.get("RENEW_THRESHOLD_DAYS", "3"))
 ENABLE_RECORDING     = os.environ.get("ENABLE_RECORDING", "true").strip().lower() == "true"
 
@@ -48,7 +50,6 @@ def err(msg):  print(f"[ERROR] {msg}", flush=True)
 # ── Telegram 推送 ─────────────────────────────────────────
 def send_tg(text: str, img_path: str | None = None):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        warn("TG 未配置，跳过推送")
         return
     try:
         if img_path and Path(img_path).exists():
@@ -77,6 +78,48 @@ def send_tg(text: str, img_path: str | None = None):
             log("TG 推送成功")
     except Exception as e:
         warn(f"TG 推送失败: {e}")
+
+# ── WxPusher 推送 ─────────────────────────────────────────
+def send_wx(title: str, content: str):
+    """
+    WxPusher 文字推送。
+    需要配置环境变量：
+      WX_APP_TOKEN  —— WxPusher 应用的 AppToken
+      WX_UID        —— 接收人 UID（多个用英文逗号分隔）
+    获取方式：https://wxpusher.zjiecode.com/docs
+    """
+    if not WX_APP_TOKEN or not WX_UID:
+        return
+    try:
+        uids = [u.strip() for u in WX_UID.split(",") if u.strip()]
+        payload = {
+            "appToken": WX_APP_TOKEN,
+            "content":  content,
+            "summary":  title,          # 消息列表里显示的摘要
+            "contentType": 1,           # 1=文字，2=HTML，3=Markdown
+            "uids": uids,
+        }
+        req = Request(
+            "https://wxpusher.zjiecode.com/api/send/message",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=20) as resp:
+            result = json.loads(resp.read())
+            if result.get("success"):
+                log("WxPusher 推送成功")
+            else:
+                warn(f"WxPusher 返回异常: {result.get('msg')}")
+    except Exception as e:
+        warn(f"WxPusher 推送失败: {e}")
+
+# ── 统一推送入口 ──────────────────────────────────────────
+def send_notify(title: str, content: str, img_path: str | None = None):
+    """同时发 TG（如已配置）和 WxPusher（如已配置）。"""
+    full_text = f"{title}\n\n{content}"
+    send_tg(full_text, img_path)
+    send_wx(title, content)
 
 # ── 截图 ──────────────────────────────────────────────────
 def snap(sb, name: str) -> str | None:
@@ -713,7 +756,6 @@ def run():
     log(f"▶ 监控服务器 [{SERVER_ID}]，续期阈值 < {RENEW_THRESHOLD_DAYS}d")
     if ENABLE_RECORDING:
         log("🎬 录屏已启用（设置 ENABLE_RECORDING=false 可关闭）")
-    messages = []
 
     with SB(
         uc=True,
@@ -742,19 +784,21 @@ def run():
                 ok = renew_server(sb)
                 snap(sb, "03-after-renew")
                 if ok:
-                    new_info = get_server_info(sb)
-                    msg = (f"🔄 续期成功！\n"
-                           f"之前: {stability_text}\n"
-                           f"现在: {new_info['stability_text']}"
-                           + (f" ({fmt_days(new_info['stability_days'])})"
-                              if new_info['stability_days'] else ""))
-                    log(msg)
-                    messages.append(msg)
-                    stability_text = new_info["stability_text"]
-                    stability_days = new_info["stability_days"]
+                    new_info       = get_server_info(sb)
+                    new_stab_text  = new_info["stability_text"] or "?"
+                    new_stab_days  = new_info["stability_days"]
+                    new_stab_fmt   = fmt_days(new_stab_days) if new_stab_days else new_stab_text
+                    log(f"🔄 续期成功，现在剩余: {new_stab_fmt}")
+                    stability_text = new_stab_text
+                    stability_days = new_stab_days
+                    # ✅ 只在续期成功时推送
+                    send_notify(
+                        title   = "🔄 Witchly 服务器续期成功",
+                        content = f"续期完成，剩余稳定时间：{new_stab_fmt}",
+                        img_path= snap(sb, "03-renew-ok"),
+                    )
                 else:
-                    msg = f"⚠️ 续期失败（Coins 不足或按钮未找到）\n剩余: {stability_text}"
-                    warn(msg); messages.append(msg)
+                    warn(f"⚠️ 续期失败（Coins 不足或按钮未找到），剩余: {stability_text}")
             elif stability_days is not None:
                 log(f"✅ Stability {fmt_days(stability_days)}，无需续期")
             else:
@@ -781,35 +825,29 @@ def run():
                     time.sleep(6)
 
                 snap(sb, "05-after-start")
-                msg = (f"🚀 服务器已自动启动！offline → {final_power}"
-                       if final_power in ("running", "starting")
-                       else f"⚠️ 启动指令已发送，当前: {final_power}")
-                log(msg); messages.append(msg)
+                log(f"服务器启动结果: {final_power}")
+                # ✅ 只在检测到离线并触发启动时推送
+                send_notify(
+                    title   = "🚀 Witchly 服务器离线已重启",
+                    content = "检测到服务器离线，已自动执行 Start 命令重新启动。",
+                )
 
             elif power in ("starting", "stopping"):
                 log(f"⏳ 服务器 {power} 中...")
 
             else:
-                msg = f"❓ 状态未知（{power}），请手动检查"
-                warn(msg); messages.append(msg)
+                log(f"❓ 状态未知（{power}），请手动检查")
 
-            # ⑤ 汇总推送
-            if messages:
-                stab_info = f"\nStability: {stability_text or '?'}"
-                if stability_days:
-                    stab_info += f" ({fmt_days(stability_days)})"
-                send_tg(
-                    f"【Witchly MC 监控】\n" + "\n\n".join(messages) + stab_info,
-                    snap(sb, "06-final")
-                )
-            else:
-                log("一切正常，静默退出")
+            log("一切正常，静默退出")
 
         except Exception as e:
             err(f"异常: {e}")
-            send_tg(f"【Witchly 监控】❌ 脚本异常\n{e}", snap(sb, "error"))
             traceback.print_exc()
-            # 录屏仍然保存
+            send_notify(
+                title   = "❌ Witchly 监控脚本异常",
+                content = str(e),
+                img_path= snap(sb, "error"),
+            )
             recorder.stop("run-error")
             sys.exit(1)
 

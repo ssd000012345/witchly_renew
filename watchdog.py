@@ -437,78 +437,160 @@ def get_server_info(sb) -> dict:
         "stability_days": stab_days,
     }
 
-# ── 检测控制台电源状态 ────────────────────────────────────
-def get_power_status(sb) -> str:
-    console_url = f"{BASE_URL}/servers/{SERVER_ID}/manage/console"
-    log(f"打开控制台: {console_url}")
-    sb.uc_open_with_reconnect(console_url, reconnect_time=4)
-    time.sleep(6)
-    handle_cloudflare(sb)
-    time.sleep(2)
-    dismiss_popups(sb)
-
-    # 确认真的导航到了控制台，否则重试一次
-    current = sb.get_current_url()
-    if "console" not in current and "manage" not in current:
-        warn(f"控制台导航失败，当前页: {current}，重试...")
-        snap(sb, "console-nav-failed")
-        sb.uc_open_with_reconnect(console_url, reconnect_time=6)
-        time.sleep(8)
+# ── 进入控制台（点 Manage 按钮，跟着真实跳转走）────────────
+def open_manage_page(sb) -> bool:
+    """
+    从 My Servers 页点击 Manage 按钮进入控制台。
+    实际 URL 是 /servers/{id}/manage/home，不是 /console。
+    返回 True 表示成功进入 manage 页面。
+    """
+    # 先确保在 My Servers 页
+    if "/servers" not in sb.get_current_url():
+        sb.uc_open_with_reconnect(f"{BASE_URL}/servers", reconnect_time=4)
+        time.sleep(4)
         handle_cloudflare(sb)
         time.sleep(2)
         dismiss_popups(sb)
-        current = sb.get_current_url()
-        log(f"重试后页面: {current}")
 
-    # 先读整页文字（和 Stability 同样的思路）
-    page_text = sb.execute_script("return document.body.innerText || '';").lower()
-    log(f"[DEBUG] 控制台文字片段: {page_text[:200]!r}")
+    log("点击 Manage 按钮进入控制台...")
 
-    # 从页面文字直接判断状态
-    for keyword, result in [
-        ("running",  "running"),
-        ("starting", "starting"),
-        ("stopping", "stopping"),
-        ("offline",  "offline"),
-        ("stopped",  "offline"),
-    ]:
-        if re.search(rf"\b{keyword}\b", page_text):
-            log(f"电源状态: {result}")
-            return result
-
-    # 按钮文字兜底
-    btn_status = sb.execute_script("""
-        var btns = document.querySelectorAll('button, [role="button"]');
-        for (var i = 0; i < btns.length; i++) {
-            var t = (btns[i].innerText || '').toLowerCase().trim();
-            if (t === 'stop' || t === 'stop server' || t === 'restart') return 'running';
-            if (t === 'start' || t === 'start server')                   return 'offline';
-        }
-        return 'unknown';
-    """)
-    log(f"电源状态: {btn_status}")
-    return btn_status or "unknown"
-
-# ── 启动服务器 ────────────────────────────────────────────
-def start_server(sb) -> bool:
-    log("点击 Start 按钮...")
+    # 方式1：SeleniumBase 直接找按钮点
+    clicked = False
     for sel in [
-        'button:contains("Start Server")',
-        'button:contains("Start")',
-        '[role="button"]:contains("Start")',
+        'button:contains("Manage")',
+        'a:contains("Manage")',
+        '[role="button"]:contains("Manage")',
     ]:
         try:
             if sb.is_element_visible(sel):
                 sb.uc_click(sel)
-                log(f"已点击: {sel}")
-                return True
+                clicked = True
+                log(f"已点击 Manage: {sel}")
+                break
         except Exception:
             continue
 
-    result = sb.execute_script("""
+    # 方式2：JS 点击
+    if not clicked:
+        result = sb.execute_script("""
+            var btns = document.querySelectorAll('button, a, [role="button"]');
+            for (var i = 0; i < btns.length; i++) {
+                var t = (btns[i].innerText || '').trim().toLowerCase();
+                if (t === 'manage') {
+                    btns[i].click();
+                    return 'js:' + btns[i].tagName;
+                }
+            }
+            return 'not_found';
+        """)
+        log(f"JS Manage 结果: {result}")
+        clicked = "not_found" not in str(result)
+
+    if not clicked:
+        snap(sb, "manage-btn-not-found")
+        warn("未找到 Manage 按钮")
+        return False
+
+    # 等待跳转到 manage 页面（URL 里包含 manage）
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if "manage" in sb.get_current_url():
+            break
+        time.sleep(0.5)
+
+    time.sleep(3)
+    handle_cloudflare(sb)
+    time.sleep(1)
+    dismiss_popups(sb)
+
+    current = sb.get_current_url()
+    log(f"控制台页面: {current}")
+    if "manage" not in current:
+        snap(sb, "manage-nav-failed")
+        warn(f"未能进入控制台，当前: {current}")
+        return False
+    return True
+
+
+# ── 检测控制台电源状态 ────────────────────────────────────
+def get_power_status(sb) -> str:
+    """
+    读控制台页面的电源状态。
+    控制台真实 URL: /servers/{id}/manage/home
+    判断依据（按优先级）：
+      1. 页面状态标签：ONLINE / OFFLINE / STARTING / STOPPING
+      2. POWER CONTROLS 区域的按钮：Stop/Restart = running，Start = offline
+    """
+    if not open_manage_page(sb):
+        warn("无法进入控制台，电源状态未知")
+        return "unknown"
+
+    page_text = sb.execute_script("return document.body.innerText || '';")
+    log(f"[DEBUG] 控制台文字片段: {page_text[:300]!r}")
+
+    # 优先找状态标签（截图里是 "● ONLINE" 绿色徽标）
+    # 必须精确匹配，避免把 URL 或其他文字误判
+    status_match = re.search(
+        r"\b(ONLINE|OFFLINE|STARTING|STOPPING|RUNNING|STOPPED)\b",
+        page_text, re.IGNORECASE
+    )
+    if status_match:
+        raw = status_match.group(1).upper()
+        mapping = {
+            "ONLINE": "running", "RUNNING": "running",
+            "OFFLINE": "offline", "STOPPED": "offline",
+            "STARTING": "starting", "STOPPING": "stopping",
+        }
+        status = mapping.get(raw, "unknown")
+        log(f"电源状态（标签）: {status}（原文: {raw}）")
+        return status
+
+    # 兜底：按钮文字
+    btn_status = sb.execute_script("""
         var btns = document.querySelectorAll('button, [role="button"]');
         for (var i = 0; i < btns.length; i++) {
             var t = (btns[i].innerText || '').toLowerCase().trim();
+            if (t === 'stop' || t === 'stop server' || t === 'restart' || t === 'kill')
+                return 'running';
+            if (t === 'start' || t === 'start server')
+                return 'offline';
+        }
+        return 'unknown';
+    """)
+    log(f"电源状态（按钮）: {btn_status}")
+    return btn_status or "unknown"
+
+
+# ── 启动服务器（在控制台页点 Start）──────────────────────
+def start_server(sb) -> bool:
+    """
+    在当前控制台页面（/manage/home）点击 Start 按钮。
+    如果不在控制台页则先导航过去。
+    """
+    if "manage" not in sb.get_current_url():
+        if not open_manage_page(sb):
+            return False
+
+    log("点击 Start 按钮...")
+
+    # 方式1：SeleniumBase
+    for sel in ['button:contains("Start")', 'a:contains("Start")']:
+        try:
+            if sb.is_element_visible(sel):
+                # 确认不是 Stop/Restart
+                txt = sb.get_text(sel).strip().lower()
+                if txt == "start" or txt == "start server":
+                    sb.uc_click(sel)
+                    log(f"已点击 Start: {sel}")
+                    return True
+        except Exception:
+            continue
+
+    # 方式2：JS 精确匹配
+    result = sb.execute_script("""
+        var btns = document.querySelectorAll('button, [role="button"], a');
+        for (var i = 0; i < btns.length; i++) {
+            var t = (btns[i].innerText || '').trim().toLowerCase();
             if (t === 'start' || t === 'start server') {
                 btns[i].click();
                 return 'clicked:' + btns[i].innerText.trim();
@@ -678,9 +760,9 @@ def run():
             else:
                 warn("未能解析 Stability 时间")
 
-            # ④ 电源状态检查
+            # ④ 电源状态检查（进入 /manage/home 点 Manage 按钮）
             power = get_power_status(sb)
-            snap(sb, "04-console")
+            snap(sb, "04-manage-home")
 
             if power == "running":
                 log("✅ 服务器运行中")

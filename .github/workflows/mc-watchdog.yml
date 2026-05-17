@@ -9,7 +9,7 @@ jobs:
   watchdog:
     name: 检查状态 / 自动启动 / 自动续期
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15       # 原来 10min，录屏合成需要多一点时间
 
     steps:
       - name: 拉取仓库
@@ -23,11 +23,9 @@ jobs:
       - name: 安装 SeleniumBase 及依赖
         run: |
           pip install seleniumbase
-          # SeleniumBase 会自动管理 ChromeDriver，无需手动安装
-          # UC Mode 依赖 undetected-chromedriver，seleniumbase 已内置
           python -c "import seleniumbase; print('SeleniumBase', seleniumbase.__version__)"
 
-      - name: 安装系统依赖（Chrome 运行所需）
+      - name: 安装系统依赖（Chrome + ffmpeg）
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
@@ -36,9 +34,10 @@ jobs:
             libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 \
             libxss1 libxtst6 libatk1.0-0 libatk-bridge2.0-0 \
             libcups2 libdrm2 libxkbcommon0 libgbm1 \
-            fonts-liberation xvfb
+            fonts-liberation xvfb \
+            ffmpeg                  # 🆕 录屏合成用
+          ffmpeg -version | head -1
 
-      # UC Mode 需要真实显示器环境（即使 headless，也要启动 Xvfb）
       - name: 启动虚拟显示（Xvfb）
         run: |
           Xvfb :99 -screen 0 1280x800x24 &
@@ -46,7 +45,6 @@ jobs:
           sleep 2
           echo "Xvfb 已启动"
 
-      # Cloudflare 会封锁 GitHub Actions IP，WARP 绕过
       - name: 启用 Cloudflare WARP
         uses: fscarmen/warp-on-actions@v1.3
         with:
@@ -78,6 +76,7 @@ jobs:
           TG_CHAT_ID:            ${{ secrets.TG_CHAT_ID }}
           RENEW_THRESHOLD_DAYS:  "3"
           DISPLAY:               ":99"
+          ENABLE_RECORDING:      "true"   # 🆕 改成 false 可关闭录屏
         run: python watchdog.py
 
       - name: 上传截图（调试，保留 3 天）
@@ -87,6 +86,15 @@ jobs:
           name: screenshots-${{ github.run_number }}
           path: screenshots/
           retention-days: 3
+
+      - name: 上传录屏（保留 3 天）        # 🆕
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recording-${{ github.run_number }}
+          path: recordings/
+          retention-days: 3
+          if-no-files-found: ignore       # 没有录屏文件时不报错
 
       - name: 清理旧运行记录（只保留最新 1 条）
         if: always()

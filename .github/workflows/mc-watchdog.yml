@@ -74,9 +74,11 @@ jobs:
           WITCHLY_SERVER_ID:     ${{ secrets.WITCHLY_SERVER_ID }}
           TG_BOT_TOKEN:          ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID:            ${{ secrets.TG_CHAT_ID }}
+          WX_APP_TOKEN:          ${{ secrets.WX_APP_TOKEN }}
+          WX_UID:                ${{ secrets.WX_UID }}
           RENEW_THRESHOLD_DAYS:  "3"
           DISPLAY:               ":99"
-          ENABLE_RECORDING:      "true"   # 🆕 改成 false 可关闭录屏
+          ENABLE_RECORDING:      "true"
         run: python watchdog.py
 
       - name: 上传截图（调试，保留 3 天）

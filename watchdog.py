@@ -283,36 +283,70 @@ def dismiss_popups(sb):
 
 # ── Discord OAuth 授权 ────────────────────────────────────
 def handle_oauth(sb):
+    """
+    点击 Discord OAuth 授权页的 Authorize 按钮。
+    策略：先等按钮渲染完，再用 JS 直接点（Driver 模式下更可靠）。
+    """
     log("处理 Discord OAuth 授权...")
-    for _ in range(10):
-        if "discord.com" not in sb.get_current_url():
+    # 等授权页完全渲染（按钮需要 JS 加载）
+    time.sleep(3)
+
+    for attempt in range(15):
+        cur = sb.get_current_url()
+        if "discord.com" not in cur:
+            log(f"OAuth 完成，已离开 Discord: {cur}")
             return
+
+        # 滚动到底部让按钮可见
         sb.execute_script("""
             document.querySelectorAll('div').forEach(el => {
                 if (el.scrollHeight > el.clientHeight + 10) el.scrollTop = el.scrollHeight;
             });
             window.scrollTo(0, document.body.scrollHeight);
         """)
-        for sel in [
-            'button:contains("Authorize")',
-            'button:contains("授权")',
-            'button[type="submit"]',
-        ]:
-            try:
-                if not sb.is_element_visible(sel):
-                    continue
-                text = sb.get_text(sel).strip().lower()
-                if any(k in text for k in ("cancel", "deny", "取消")):
-                    continue
-                sb.uc_click(sel)
-                log(f"已授权: {text!r}")
-                # 等跳回 witchly，最多 5 秒
-                if wait_for_url(sb, "witchly.host", timeout=5):
-                    return
-                break
-            except Exception:
-                continue
-        time.sleep(0.8)
+        time.sleep(0.5)
+
+        # 方式1：JS 直接点击 Authorize（最可靠，不受可见性限制）
+        clicked = sb.execute_script("""
+            var btns = document.querySelectorAll('button');
+            for (var i = 0; i < btns.length; i++) {
+                var t = (btns[i].innerText || btns[i].textContent || '').trim().toLowerCase();
+                // 点 Authorize / 授权，跳过 Cancel / Deny
+                if ((t.includes('authoriz') || t === '授权') &&
+                    !t.includes('cancel') && !t.includes('deny')) {
+                    btns[i].click();
+                    return 'js:' + btns[i].innerText.trim();
+                }
+            }
+            // 兜底：找唯一的 submit 按钮
+            var submit = document.querySelector('button[type="submit"]');
+            if (submit) {
+                var st = (submit.innerText || '').toLowerCase();
+                if (!st.includes('cancel') && !st.includes('deny')) {
+                    submit.click();
+                    return 'submit:' + submit.innerText.trim();
+                }
+            }
+            return 'not_found';
+        """)
+        log(f"OAuth 点击结果 [{attempt+1}/15]: {clicked}")
+
+        if clicked and "not_found" not in str(clicked):
+            # 等待跳回 witchly（最多 15 秒）
+            if wait_for_url(sb, "witchly.host", timeout=15):
+                log("OAuth 授权成功，已跳回 Witchly")
+                return
+            # 没跳回就继续重试
+            time.sleep(1)
+        else:
+            # 按钮没找到，截图一次帮助调试
+            if attempt == 5:
+                snap(sb, "oauth-btn-not-found")
+            time.sleep(1.5)
+
+    # 最终仍在 Discord，截图并报错
+    snap(sb, "oauth-timeout")
+    raise RuntimeError(f"OAuth 授权超时，停留在: {sb.get_current_url()}")
 
 # ── Discord Token 注入登录 ────────────────────────────────
 def discord_login(sb):
@@ -386,12 +420,15 @@ def discord_login(sb):
     if "discord.com/oauth2/authorize" in sb.get_current_url():
         handle_oauth(sb)
 
-    if not wait_for_url(sb, "witchly.host", timeout=20):
-        if "discord.com" in sb.get_current_url():
-            handle_oauth(sb)
-        if not wait_for_url(sb, "witchly.host", timeout=10):
-            snap(sb, "not-witchly")
-            raise RuntimeError("未能跳回 Witchly，当前: " + sb.get_current_url())
+    # 等待跳回 Witchly（handle_oauth 内部已经在等了）
+    if "discord.com" in sb.get_current_url():
+        # OAuth 页面还没处理完，再调一次
+        handle_oauth(sb)
+
+    # 最终确认已在 Witchly
+    if not wait_for_url(sb, "witchly.host", timeout=10):
+        snap(sb, "not-witchly")
+        raise RuntimeError("未能跳回 Witchly，当前: " + sb.get_current_url())
 
     handle_cloudflare(sb)
     dismiss_popups(sb)

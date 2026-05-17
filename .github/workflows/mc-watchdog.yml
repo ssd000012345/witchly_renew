@@ -84,17 +84,19 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: screenshots-${{ github.run_number }}
-          path: screenshots/
+          path: |
+            screenshots/
+            !screenshots/rec/
           retention-days: 3
 
-      - name: 上传录屏（保留 3 天）        # 🆕
+      - name: 上传录屏（保留 3 天）
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: recording-${{ github.run_number }}
           path: recordings/
           retention-days: 3
-          if-no-files-found: ignore       # 没有录屏文件时不报错
+          if-no-files-found: ignore
 
       - name: 清理旧运行记录（只保留最新 1 条）
         if: always()

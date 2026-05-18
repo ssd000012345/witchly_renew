@@ -35,6 +35,8 @@ RENEW_THRESHOLD_DAYS = float(os.environ.get("RENEW_THRESHOLD_DAYS", "3"))
 ENABLE_RECORDING     = os.environ.get("ENABLE_RECORDING", "true").strip().lower() == "true"
 # 由 Uptime Kuma webhook 触发时设为 true，跳过续期只做启动检查
 SKIP_RENEW           = os.environ.get("SKIP_RENEW", "false").strip().lower() == "true"
+# Uptime Kuma 传入的状态，UP 时直接退出不做任何操作
+UPTIME_STATUS        = os.environ.get("UPTIME_STATUS", "").strip().lower()
 
 BASE_URL       = "https://dash.witchly.host"
 SCREENSHOT_DIR = Path("screenshots")
@@ -841,6 +843,11 @@ def run():
         raise RuntimeError("缺少: WITCHLY_SERVER_ID")
 
     log(f"▶ 监控服务器 [{SERVER_ID}]，续期阈值 < {RENEW_THRESHOLD_DAYS}d")
+
+    # Uptime Kuma 恢复(UP)触发时直接退出，不需要做任何操作
+    if UPTIME_STATUS == "up":
+        log("✅ Uptime Kuma 状态为 UP（服务器已恢复），无需操作，退出")
+        return
     if ENABLE_RECORDING:
         log("🎬 录屏已启用（设置 ENABLE_RECORDING=false 可关闭）")
 

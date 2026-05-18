@@ -69,6 +69,7 @@ jobs:
           DISPLAY:               ":99"
           ENABLE_RECORDING:      "true"
           SKIP_RENEW:            "true"
+          UPTIME_STATUS:         ${{ github.event.client_payload.status }}
         run: python watchdog.py
 
       - name: 上传截图

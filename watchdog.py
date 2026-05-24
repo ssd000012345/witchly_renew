@@ -31,7 +31,7 @@ TG_BOT_TOKEN         = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID           = os.environ.get("TG_CHAT_ID", "").strip()
 WX_APP_TOKEN         = os.environ.get("WX_APP_TOKEN", "").strip()   # WxPusher AppToken
 WX_UID               = os.environ.get("WX_UID", "").strip()          # WxPusher UID
-RENEW_THRESHOLD_DAYS = float(os.environ.get("RENEW_THRESHOLD_DAYS", "3"))
+RENEW_THRESHOLD_DAYS = float(os.environ.get("RENEW_THRESHOLD_DAYS", "7"))
 ENABLE_RECORDING     = os.environ.get("ENABLE_RECORDING", "true").strip().lower() == "true"
 # 由 Uptime Kuma webhook 触发时设为 true，跳过续期只做启动检查
 SKIP_RENEW           = os.environ.get("SKIP_RENEW", "false").strip().lower() == "true"

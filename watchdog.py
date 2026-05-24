@@ -31,14 +31,12 @@ TG_BOT_TOKEN         = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID           = os.environ.get("TG_CHAT_ID", "").strip()
 WX_APP_TOKEN         = os.environ.get("WX_APP_TOKEN", "").strip()   # WxPusher AppToken
 WX_UID               = os.environ.get("WX_UID", "").strip()          # WxPusher UID
-RENEW_THRESHOLD_DAYS      = float(os.environ.get("RENEW_THRESHOLD_DAYS", "3"))
-# 高频模式阈值：Stability 低于此值时，12小时触发才有意义；高于则直接退出
-HIGH_FREQ_THRESHOLD_DAYS  = float(os.environ.get("HIGH_FREQ_THRESHOLD_DAYS", "2"))
-# 是否是12小时高频触发（由 workflow 传入 HIGH_FREQ_RUN=true）
-HIGH_FREQ_RUN             = os.environ.get("HIGH_FREQ_RUN", "false").strip().lower() == "true"
+RENEW_THRESHOLD_DAYS = float(os.environ.get("RENEW_THRESHOLD_DAYS", "2"))  # <2天才续期
 ENABLE_RECORDING     = os.environ.get("ENABLE_RECORDING", "true").strip().lower() == "true"
 # 由 Uptime Kuma webhook 触发时设为 true，跳过续期只做启动检查
 SKIP_RENEW           = os.environ.get("SKIP_RENEW", "false").strip().lower() == "true"
+# 手动触发时设为 true，强制执行续期（忽略 Stability 天数限制）
+FORCE_RENEW          = os.environ.get("FORCE_RENEW", "false").strip().lower() == "true"
 # Uptime Kuma 传入的心跳状态，用于判断是 DOWN 还是 UP 触发
 _heartbeat_raw       = os.environ.get("UPTIME_HEARTBEAT", "").strip()
 _uptime_status_raw   = os.environ.get("UPTIME_STATUS", "").strip().lower()
@@ -913,6 +911,48 @@ def renew_server(sb) -> bool:
     log("Proceed 点击后未检测到错误，续期请求已提交")
     return True
 
+# ── 续期执行+验证（供 run() 调用）────────────────────────
+def _do_renew(sb, info: dict, stability_text: str, stability_days):
+    coins_before = info.get("coins")
+    stab_before  = stability_days
+
+    ok = renew_server(sb)
+    snap(sb, "03-after-renew")
+
+    if ok:
+        new_info      = get_server_info(sb)
+        new_stab_text = new_info["stability_text"] or "?"
+        new_stab_days = new_info["stability_days"]
+        new_stab_fmt  = fmt_days(new_stab_days) if new_stab_days else new_stab_text
+        coins_after   = new_info.get("coins")
+
+        stab_increased  = (new_stab_days is not None and stab_before is not None
+                           and new_stab_days > stab_before + 0.1)
+        coins_decreased = (coins_before is not None and coins_after is not None
+                           and coins_after < coins_before)
+        truly_ok = stab_increased or coins_decreased
+
+        if truly_ok:
+            log(f"✅ 续期成功（Stability: {fmt_days(stab_before) if stab_before else '?'} → {new_stab_fmt}"
+                + (f"，Coins: {coins_before} → {coins_after}" if coins_before and coins_after else "") + "）")
+            # ✅ 续期成功发推送
+            send_notify(
+                title   = "🔄 Witchly 服务器续期成功",
+                content = f"续期完成，剩余稳定时间：{new_stab_fmt}",
+                img_path= snap(sb, "03-renew-ok"),
+            )
+        else:
+            # 平台拒绝（如 Too early），静默记录，不推送
+            warn(f"⚠️ 续期按钮已点但验证失败（平台可能拒绝）："
+                 f"Stability {fmt_days(stab_before) if stab_before else '?'} → {new_stab_fmt}"
+                 + (f"，Coins {coins_before} → {coins_after}" if coins_before and coins_after else ""))
+            snap(sb, "renew-verify-fail")
+    else:
+        # 按钮未找到/流程中断，静默记录，不推送
+        warn(f"⚠️ 续期失败（按钮未找到或流程中断），剩余: {stability_text}")
+        snap(sb, "renew-fail")
+
+
 # ── 主流程 ────────────────────────────────────────────────
 def run():
     if not DISCORD_TOKEN:
@@ -958,72 +998,23 @@ def run():
                 log("✅ 服务器已在线（Uptime Kuma UP 恢复触发），无需操作，退出")
                 return
 
-            # ── 高频模式提前退出 ──────────────────────────────
-            # HIGH_FREQ_RUN=true 表示这次是12小时触发的副本
-            # 只有 Stability < HIGH_FREQ_THRESHOLD_DAYS 时才继续，否则没必要跑
-            if HIGH_FREQ_RUN:
-                if stability_days is not None and stability_days >= HIGH_FREQ_THRESHOLD_DAYS:
-                    log(f"⏩ 高频触发但 Stability {fmt_days(stability_days)} >= {HIGH_FREQ_THRESHOLD_DAYS}d，无需操作，退出")
-                    return
-                else:
-                    log(f"⚠ 高频触发，Stability {fmt_days(stability_days) if stability_days else '?'} < {HIGH_FREQ_THRESHOLD_DAYS}d，继续执行...")
-
-            # ③ 续期检查（Uptime Kuma 紧急触发时跳过）
+            # ③ 续期检查
             if SKIP_RENEW:
                 log("⏩ SKIP_RENEW=true，跳过续期检查")
+
+            elif FORCE_RENEW:
+                # 手动触发强制续期，忽略天数
+                log(f"🔧 FORCE_RENEW=true，强制执行续期（当前 Stability: {fmt_days(stability_days) if stability_days else '?'}）")
+                _do_renew(sb, info, stability_text, stability_days)
+
             elif stability_days is not None and stability_days < RENEW_THRESHOLD_DAYS:
+                # 自动触发：Stability < 2天才续期
                 log(f"⚠ Stability {fmt_days(stability_days)} < {RENEW_THRESHOLD_DAYS}d，触发续期")
+                _do_renew(sb, info, stability_text, stability_days)
 
-                # 记录续期前的 Coins 和 Stability，用于事后验证
-                coins_before = info.get("coins")
-                stab_before  = stability_days
-
-                ok = renew_server(sb)
-                snap(sb, "03-after-renew")
-
-                if ok:
-                    # ── 双重验证：对比续期前后 Coins 和 Stability ──
-                    new_info      = get_server_info(sb)
-                    new_stab_text = new_info["stability_text"] or "?"
-                    new_stab_days = new_info["stability_days"]
-                    new_stab_fmt  = fmt_days(new_stab_days) if new_stab_days else new_stab_text
-                    coins_after   = new_info.get("coins")
-
-                    stab_increased  = (new_stab_days is not None and stab_before is not None
-                                       and new_stab_days > stab_before + 0.1)
-                    coins_decreased = (coins_before is not None and coins_after is not None
-                                       and coins_after < coins_before)
-                    truly_ok = stab_increased or coins_decreased
-
-                    if truly_ok:
-                        log(f"✅ 续期验证通过（Stability: {fmt_days(stab_before) if stab_before else '?'} → {new_stab_fmt}"
-                            + (f"，Coins: {coins_before} → {coins_after}" if coins_before and coins_after else "") + "）")
-                        stability_text = new_stab_text
-                        stability_days = new_stab_days
-                        send_notify(
-                            title   = "🔄 Witchly 服务器续期成功",
-                            content = f"续期完成，剩余稳定时间：{new_stab_fmt}",
-                            img_path= snap(sb, "03-renew-ok"),
-                        )
-                    else:
-                        warn(f"⚠️ 续期按钮已点但验证失败：Stability {fmt_days(stab_before) if stab_before else '?'} → {new_stab_fmt}"
-                             + (f"，Coins {coins_before} → {coins_after}" if coins_before and coins_after else ""))
-                        send_notify(
-                            title   = "⚠️ Witchly 续期可能失败（平台拒绝）",
-                            content = (f"按钮已点击但 Stability/Coins 无变化，平台可能返回了错误（如 Too early）。\n"
-                                       f"Stability: {fmt_days(stab_before) if stab_before else '?'} → {new_stab_fmt}\n"
-                                       + (f"Coins: {coins_before} → {coins_after}" if coins_before and coins_after else "")),
-                            img_path= snap(sb, "renew-verify-fail"),
-                        )
-                else:
-                    warn(f"⚠️ 续期失败（Coins 不足或按钮未找到），剩余: {stability_text}")
-                    send_notify(
-                        title   = "⚠️ Witchly 服务器续期失败",
-                        content = f"Coins 不足或未找到续期按钮，当前剩余稳定时间：{stability_text}，请手动处理。",
-                        img_path= snap(sb, "renew-fail-notify"),
-                    )
             elif stability_days is not None:
                 log(f"✅ Stability {fmt_days(stability_days)}，无需续期")
+
             else:
                 warn("未能解析 Stability 时间")
 

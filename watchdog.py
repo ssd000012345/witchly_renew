@@ -31,7 +31,11 @@ TG_BOT_TOKEN         = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID           = os.environ.get("TG_CHAT_ID", "").strip()
 WX_APP_TOKEN         = os.environ.get("WX_APP_TOKEN", "").strip()   # WxPusher AppToken
 WX_UID               = os.environ.get("WX_UID", "").strip()          # WxPusher UID
-RENEW_THRESHOLD_DAYS = float(os.environ.get("RENEW_THRESHOLD_DAYS", "7"))
+RENEW_THRESHOLD_DAYS      = float(os.environ.get("RENEW_THRESHOLD_DAYS", "3"))
+# 高频模式阈值：Stability 低于此值时，12小时触发才有意义；高于则直接退出
+HIGH_FREQ_THRESHOLD_DAYS  = float(os.environ.get("HIGH_FREQ_THRESHOLD_DAYS", "2"))
+# 是否是12小时高频触发（由 workflow 传入 HIGH_FREQ_RUN=true）
+HIGH_FREQ_RUN             = os.environ.get("HIGH_FREQ_RUN", "false").strip().lower() == "true"
 ENABLE_RECORDING     = os.environ.get("ENABLE_RECORDING", "true").strip().lower() == "true"
 # 由 Uptime Kuma webhook 触发时设为 true，跳过续期只做启动检查
 SKIP_RENEW           = os.environ.get("SKIP_RENEW", "false").strip().lower() == "true"
@@ -530,12 +534,20 @@ def get_server_info(sb) -> dict:
 
     stab_days = parse_stability_days(stability_text)
     stab_str  = (stability_text or "?") + (f" ({fmt_days(stab_days)})" if stab_days else "")
-    log(f"状态: {status}  |  Stability: {stab_str}")
+
+    # ── 解析 Coins 数量（用于续期验证）──
+    coins = None
+    m_coins = re.search(r"(\d{3,6})\s*COINS", page_text, re.IGNORECASE)
+    if m_coins:
+        coins = int(m_coins.group(1))
+
+    log(f"状态: {status}  |  Stability: {stab_str}" + (f"  |  Coins: {coins}" if coins else ""))
 
     return {
         "status":         status or "unknown",
         "stability_text": stability_text,
         "stability_days": stab_days,
+        "coins":          coins,
     }
 
 # ── 进入控制台（点 Manage 按钮，跟着真实跳转走）────────────
@@ -829,6 +841,7 @@ def renew_server(sb) -> bool:
 
     time.sleep(2)
 
+    proceed_clicked = False
     for sel in [
         'button:contains("Proceed")',
         'button[class*="purple"]',
@@ -838,29 +851,67 @@ def renew_server(sb) -> bool:
             if sb.is_element_visible(sel):
                 sb.uc_click(sel)
                 log(f"已点击 Proceed: {sel}")
-                time.sleep(3)
-                return True
+                proceed_clicked = True
+                break
         except Exception:
             continue
 
-    r = sb.execute_script("""
-        var btns = document.querySelectorAll('button');
-        for (var i = 0; i < btns.length; i++) {
-            if ((btns[i].innerText || '').toLowerCase().includes('proceed')) {
-                btns[i].click();
-                return 'js-proceed';
+    if not proceed_clicked:
+        r = sb.execute_script("""
+            var btns = document.querySelectorAll('button');
+            for (var i = 0; i < btns.length; i++) {
+                if ((btns[i].innerText || '').toLowerCase().includes('proceed')) {
+                    btns[i].click();
+                    return 'js-proceed';
+                }
             }
-        }
-        return 'not_found';
-    """)
-    if "not_found" not in str(r):
-        log(f"JS Proceed: {r}")
-        time.sleep(3)
-        return True
+            return 'not_found';
+        """)
+        if "not_found" not in str(r):
+            log(f"JS Proceed: {r}")
+            proceed_clicked = True
+        else:
+            warn("未找到 Proceed 按钮")
+            snap(sb, "proceed-not-found")
+            return False
 
-    warn("未找到 Proceed 按钮")
-    snap(sb, "proceed-not-found")
-    return False
+    # ── Proceed 点完后等待，检测平台是否返回错误弹窗 ──
+    time.sleep(3)
+    error_msg = sb.execute_script("""
+        var texts = [
+            document.body.innerText || '',
+            document.querySelector('[role="alert"]') ? document.querySelector('[role="alert"]').innerText : '',
+        ].join(' ').toLowerCase();
+
+        // 检测常见失败关键字
+        if (texts.includes('renewal failed') ||
+            texts.includes('too early') ||
+            texts.includes('not enough') ||
+            texts.includes('insufficient') ||
+            texts.includes('failed')) {
+
+            // 返回具体错误文字（取第一个含关键字的短段落）
+            var paras = (document.body.innerText || '').split('\\n');
+            for (var i = 0; i < paras.length; i++) {
+                var p = paras[i].toLowerCase();
+                if (p.includes('renewal failed') || p.includes('too early') ||
+                    p.includes('not enough') || p.includes('insufficient') ||
+                    p.includes('failed')) {
+                    return paras[i].trim();
+                }
+            }
+            return 'renewal_failed';
+        }
+        return 'ok';
+    """)
+
+    if error_msg != "ok":
+        warn(f"平台续期拒绝: {error_msg}")
+        snap(sb, "renew-platform-error")
+        return False
+
+    log("Proceed 点击后未检测到错误，续期请求已提交")
+    return True
 
 # ── 主流程 ────────────────────────────────────────────────
 def run():
@@ -907,27 +958,63 @@ def run():
                 log("✅ 服务器已在线（Uptime Kuma UP 恢复触发），无需操作，退出")
                 return
 
+            # ── 高频模式提前退出 ──────────────────────────────
+            # HIGH_FREQ_RUN=true 表示这次是12小时触发的副本
+            # 只有 Stability < HIGH_FREQ_THRESHOLD_DAYS 时才继续，否则没必要跑
+            if HIGH_FREQ_RUN:
+                if stability_days is not None and stability_days >= HIGH_FREQ_THRESHOLD_DAYS:
+                    log(f"⏩ 高频触发但 Stability {fmt_days(stability_days)} >= {HIGH_FREQ_THRESHOLD_DAYS}d，无需操作，退出")
+                    return
+                else:
+                    log(f"⚠ 高频触发，Stability {fmt_days(stability_days) if stability_days else '?'} < {HIGH_FREQ_THRESHOLD_DAYS}d，继续执行...")
+
             # ③ 续期检查（Uptime Kuma 紧急触发时跳过）
             if SKIP_RENEW:
                 log("⏩ SKIP_RENEW=true，跳过续期检查")
             elif stability_days is not None and stability_days < RENEW_THRESHOLD_DAYS:
                 log(f"⚠ Stability {fmt_days(stability_days)} < {RENEW_THRESHOLD_DAYS}d，触发续期")
+
+                # 记录续期前的 Coins 和 Stability，用于事后验证
+                coins_before = info.get("coins")
+                stab_before  = stability_days
+
                 ok = renew_server(sb)
                 snap(sb, "03-after-renew")
+
                 if ok:
-                    new_info       = get_server_info(sb)
-                    new_stab_text  = new_info["stability_text"] or "?"
-                    new_stab_days  = new_info["stability_days"]
-                    new_stab_fmt   = fmt_days(new_stab_days) if new_stab_days else new_stab_text
-                    log(f"🔄 续期成功，现在剩余: {new_stab_fmt}")
-                    stability_text = new_stab_text
-                    stability_days = new_stab_days
-                    # ✅ 只在续期成功时推送
-                    send_notify(
-                        title   = "🔄 Witchly 服务器续期成功",
-                        content = f"续期完成，剩余稳定时间：{new_stab_fmt}",
-                        img_path= snap(sb, "03-renew-ok"),
-                    )
+                    # ── 双重验证：对比续期前后 Coins 和 Stability ──
+                    new_info      = get_server_info(sb)
+                    new_stab_text = new_info["stability_text"] or "?"
+                    new_stab_days = new_info["stability_days"]
+                    new_stab_fmt  = fmt_days(new_stab_days) if new_stab_days else new_stab_text
+                    coins_after   = new_info.get("coins")
+
+                    stab_increased  = (new_stab_days is not None and stab_before is not None
+                                       and new_stab_days > stab_before + 0.1)
+                    coins_decreased = (coins_before is not None and coins_after is not None
+                                       and coins_after < coins_before)
+                    truly_ok = stab_increased or coins_decreased
+
+                    if truly_ok:
+                        log(f"✅ 续期验证通过（Stability: {fmt_days(stab_before) if stab_before else '?'} → {new_stab_fmt}"
+                            + (f"，Coins: {coins_before} → {coins_after}" if coins_before and coins_after else "") + "）")
+                        stability_text = new_stab_text
+                        stability_days = new_stab_days
+                        send_notify(
+                            title   = "🔄 Witchly 服务器续期成功",
+                            content = f"续期完成，剩余稳定时间：{new_stab_fmt}",
+                            img_path= snap(sb, "03-renew-ok"),
+                        )
+                    else:
+                        warn(f"⚠️ 续期按钮已点但验证失败：Stability {fmt_days(stab_before) if stab_before else '?'} → {new_stab_fmt}"
+                             + (f"，Coins {coins_before} → {coins_after}" if coins_before and coins_after else ""))
+                        send_notify(
+                            title   = "⚠️ Witchly 续期可能失败（平台拒绝）",
+                            content = (f"按钮已点击但 Stability/Coins 无变化，平台可能返回了错误（如 Too early）。\n"
+                                       f"Stability: {fmt_days(stab_before) if stab_before else '?'} → {new_stab_fmt}\n"
+                                       + (f"Coins: {coins_before} → {coins_after}" if coins_before and coins_after else "")),
+                            img_path= snap(sb, "renew-verify-fail"),
+                        )
                 else:
                     warn(f"⚠️ 续期失败（Coins 不足或按钮未找到），剩余: {stability_text}")
                     send_notify(

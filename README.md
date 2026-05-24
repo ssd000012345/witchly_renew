@@ -9,7 +9,7 @@
 
 | 功能 | 说明 |
 |------|------|
-| 🔄 **自动续期** | Stability 剩余不足 3 天时自动点击续期按钮（消耗 500 Coins） |
+| 🔄 **自动续期** | Stability 剩余不足 2 天时自动点击续期按钮（消耗 500 Coins） |
 | 🚀 **自动重启** | 检测到服务器 OFFLINE 时自动点击 Start，等待确认 ONLINE |
 | 🛡️ **Cloudflare 绕过** | 通过 Cloudflare WARP + SeleniumBase UC Mode 绕过 Turnstile 验证 |
 | 🔔 **消息推送** | 支持 WxPusher（微信）和 Telegram 双渠道推送，仅在关键事件时触发 |

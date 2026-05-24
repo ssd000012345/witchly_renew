@@ -427,6 +427,10 @@ def discord_login(sb):
 
     if "discord.com/login" in sb.get_current_url():
         snap(sb, "token-invalid")
+        send_notify(
+            title   = "🔑 Discord Token 已失效",
+            content = "Witchly 监控：Discord Token 无效或已过期，自动登录失败，请重新获取 Token 并更新环境变量 WITCHLY_DISCORD_TOKEN。",
+        )
         raise RuntimeError("Discord Token 无效或已过期，请重新获取")
 
     log("Token 注入成功")
@@ -757,6 +761,14 @@ def renew_server(sb) -> bool:
 
     clicked = sb.execute_script(f"""
         var SERVER_ID = "{SERVER_ID}";
+
+        // ── 策略0：优先找 title="Extend Stability" 的按钮（最精准）──
+        var extendBtn = document.querySelector('button[title="Extend Stability"]');
+        if (extendBtn) {{
+            extendBtn.click();
+            return 'extend-stability-title';
+        }}
+
         var card = null;
         var all = document.querySelectorAll('*');
         for (var i = 0; i < all.length; i++) {{
@@ -767,6 +779,18 @@ def renew_server(sb) -> bool:
         }}
         var root = card || document.body;
 
+        // ── 策略1：aria-label / title 含 extend/renew/stab（不限 svg）──
+        var allBtns = root.querySelectorAll('button, [role="button"]');
+        for (var i = 0; i < allBtns.length; i++) {{
+            var btn = allBtns[i];
+            var label = (btn.title || btn.getAttribute('aria-label') || '').toLowerCase();
+            if (/renew|extend|stab/.test(label)) {{
+                btn.click();
+                return 'label-btn:' + label;
+            }}
+        }}
+
+        // ── 策略2：purple / violet 颜色按钮 ──
         var btns = root.querySelectorAll('button, [role="button"]');
         for (var i = 0; i < btns.length; i++) {{
             var btn = btns[i];
@@ -779,6 +803,7 @@ def renew_server(sb) -> bool:
             }}
         }}
 
+        // ── 策略3：STABILITY 标签附近最后一个按钮 ──
         for (var i = 0; i < all.length; i++) {{
             var el = all[i];
             if ((el.innerText || '').trim().toUpperCase() === 'STABILITY') {{
@@ -789,17 +814,6 @@ def renew_server(sb) -> bool:
                         ab[ab.length - 1].click();
                         return 'stability-btn';
                     }}
-                }}
-            }}
-        }}
-
-        for (var i = 0; i < btns.length; i++) {{
-            var btn = btns[i];
-            if (btn.querySelector('svg')) {{
-                var label = (btn.title || btn.getAttribute('aria-label') || '').toLowerCase();
-                if (/renew|extend|stab/.test(label)) {{
-                    btn.click();
-                    return 'svg-btn:' + label;
                 }}
             }}
         }}
@@ -916,6 +930,11 @@ def run():
                     )
                 else:
                     warn(f"⚠️ 续期失败（Coins 不足或按钮未找到），剩余: {stability_text}")
+                    send_notify(
+                        title   = "⚠️ Witchly 服务器续期失败",
+                        content = f"Coins 不足或未找到续期按钮，当前剩余稳定时间：{stability_text}，请手动处理。",
+                        img_path= snap(sb, "renew-fail-notify"),
+                    )
             elif stability_days is not None:
                 log(f"✅ Stability {fmt_days(stability_days)}，无需续期")
             else:

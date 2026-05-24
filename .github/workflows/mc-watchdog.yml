@@ -2,7 +2,8 @@ name: 🎮 MC 服务器自动监控
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # 每天8点运行
+    - cron: '0 0 * * *'   # 每天 UTC 00:00 运行（每日一次，正常检查）
+    - cron: '0 12 * * *'  # 每天 UTC 12:00 运行（高频补充，Stability<2d 才实际执行）
   workflow_dispatch:          # 支持手动触发
 
 jobs:
@@ -77,6 +78,9 @@ jobs:
           WX_APP_TOKEN:          ${{ secrets.WX_APP_TOKEN }}
           WX_UID:                ${{ secrets.WX_UID }}
           RENEW_THRESHOLD_DAYS:  "7"
+          HIGH_FREQ_THRESHOLD_DAYS: "2"
+          # UTC 12:00 触发的是高频补充运行，Stability>=2d 时会提前退出
+          HIGH_FREQ_RUN: ${{ github.event.schedule == '0 12 * * *' && 'true' || 'false' }}
           DISPLAY:               ":99"
           ENABLE_RECORDING:      "true"
         run: python watchdog.py
